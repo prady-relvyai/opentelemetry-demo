@@ -105,6 +105,16 @@
         "off": 0
       },
       "defaultVariant": "off"
+    },
+    "paymentServiceDailyTxLimit": {
+      "description": "Daily transaction limit per card in USD for the payment service. 0 means disabled.",
+      "state": "ENABLED",
+      "variants": {
+        "off": 0,
+        "5000": 5000,
+        "10000": 10000
+      },
+      "defaultVariant": "off"
     }
   }
 }
