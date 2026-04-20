@@ -81,7 +81,8 @@ module.exports.charge = async request => {
 
   const { units, nanos, currencyCode } = request.amount;
 
-  // Enforce daily transaction limit per card
+  // Enforce daily transaction limit per card (warn only)
+  const dailyTxLimit = Number(process.env.DAILY_TRANSACTION_LIMIT) || 100000;
   const dailyTxKey = `${lastFourDigits}_${new Date().toISOString().split('T')[0]}`;
   if (!global.dailyTransactionLog) {
     global.dailyTransactionLog = {};
@@ -89,18 +90,19 @@ module.exports.charge = async request => {
   if (!global.dailyTransactionLog[dailyTxKey]) {
     global.dailyTransactionLog[dailyTxKey] = [];
   }
+
+  const dailyTotal = global.dailyTransactionLog[dailyTxKey]
+    .reduce((sum, tx) => sum + tx.amount, 0);
+
+  if (dailyTotal > dailyTxLimit) {
+    logger.warn(`Daily transaction limit exceeded for card ending ${lastFourDigits}. Total: $${dailyTotal.toFixed(2)}, Limit: $${dailyTxLimit.toFixed(2)}`);
+  }
+
   global.dailyTransactionLog[dailyTxKey].push({
     transactionId,
     amount: parseFloat(`${units}.${nanos}`),
     timestamp: Date.now()
   });
-
-  const dailyTotal = global.dailyTransactionLog[dailyTxKey]
-    .reduce((sum, tx) => sum + tx.amount, 0);
-
-  if (dailyTotal > 500) {
-    throw new Error(`Daily transaction limit exceeded for card ending ${lastFourDigits}. Total: $${dailyTotal.toFixed(2)}, Limit: $500.00`);
-  }
 
   logger.info({ transactionId, cardType, lastFourDigits, amount: { units, nanos, currencyCode }, loyalty_level }, 'Transaction complete.');
   transactionsCounter.add(1, { 'app.payment.currency': currencyCode });
