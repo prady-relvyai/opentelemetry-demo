@@ -35,23 +35,37 @@ from grpc_health.v1 import health_pb2_grpc
 from metrics import (
     init_metrics
 )
+from affinity import record_interaction, rank_by_affinity
 
 cached_ids = []
 first_run = True
 
 class RecommendationService(demo_pb2_grpc.RecommendationServiceServicer):
     def ListRecommendations(self, request, context):
+        # Record user's browsing history for affinity scoring
+        # Extract user context from metadata if available
+        metadata = dict(context.invocation_metadata())
+        user_id = metadata.get("x-user-id", "anonymous")
+
+        # Record interaction with the products user is currently viewing
+        if request.product_ids:
+            record_interaction(user_id, list(request.product_ids))
+
         prod_list = get_product_list(request.product_ids)
         span = trace.get_current_span()
+
+        # Re-rank by category affinity for personalized results
+        prod_list = rank_by_affinity(user_id, prod_list)
+        span.set_attribute("app.recommendation.personalized", user_id != "anonymous")
         span.set_attribute("app.products_recommended.count", len(prod_list))
-        logger.info(f"Receive ListRecommendations for product ids:{prod_list}")
+        logger.info(f"Receive ListRecommendations for user={user_id}, product ids:{prod_list}")
 
         # build and return response
         response = demo_pb2.ListRecommendationsResponse()
         response.product_ids.extend(prod_list)
 
         # Collect metrics for this service
-        rec_svc_metrics["app_recommendations_counter"].add(len(prod_list), {'recommendation.type': 'catalog'})
+        rec_svc_metrics["app_recommendations_counter"].add(len(prod_list), {'recommendation.type': 'personalized'})
 
         return response
 
