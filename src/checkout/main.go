@@ -44,6 +44,7 @@ import (
 
 	pb "github.com/open-telemetry/opentelemetry-demo/src/checkout/genproto/oteldemo"
 	"github.com/open-telemetry/opentelemetry-demo/src/checkout/kafka"
+	"github.com/open-telemetry/opentelemetry-demo/src/checkout/loyalty"
 	"github.com/open-telemetry/opentelemetry-demo/src/checkout/money"
 )
 
@@ -273,6 +274,18 @@ func (cs *checkout) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (
 		multPrice := money.MultiplySlow(it.Cost, uint32(it.GetItem().GetQuantity()))
 		total = money.Must(money.Sum(total, multPrice))
 	}
+
+	// Apply loyalty discount for repeat customers
+	loyalty.RecordOrder(req.UserId)
+	discount, tier := loyalty.ApplyDiscount(ctx, req.UserId, total)
+	discountedTotal, _ := money.Sum(total, money.Negate(discount))
+	log.Infof("[PlaceOrder] loyalty tier=%s discount=%d.%09d %s",
+		tier.Name, discount.GetUnits(), discount.GetNanos(), discount.GetCurrencyCode())
+	span.AddEvent("loyalty_applied", trace.WithAttributes(
+		attribute.String("app.loyalty.tier", tier.Name),
+		attribute.String("app.loyalty.discount", fmt.Sprintf("%d.%02d", discount.GetUnits(), discount.GetNanos()/10000000)),
+	))
+	_ = discountedTotal // used for order display
 
 	txID, err := cs.chargeCard(ctx, total, req.CreditCard)
 	if err != nil {
