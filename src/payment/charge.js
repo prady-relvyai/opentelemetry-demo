@@ -9,6 +9,7 @@ const { FlagdProvider } = require('@openfeature/flagd-provider');
 const flagProvider = new FlagdProvider();
 
 const logger = require('./logger');
+const { checkAndRecordTransaction } = require('./daily_limit');
 const tracer = trace.getTracer('payment');
 const meter = metrics.getMeter('payment');
 const transactionsCounter = meter.createCounter('app.payment.transactions');
@@ -48,6 +49,21 @@ module.exports.charge = async request => {
   const lastFourDigits = number.substr(-4);
   const transactionId = uuidv4();
 
+  const { units, nanos, currencyCode } = request.amount;
+
+  // Enforce daily transaction limit per card
+  const limitCheck = checkAndRecordTransaction(lastFourDigits, units, nanos, currencyCode);
+  if (!limitCheck.allowed) {
+    span.setAttributes({
+      'app.payment.daily_limit_exceeded': true,
+      'app.payment.daily_total': limitCheck.currentTotal.toFixed(2),
+    });
+    span.end();
+    throw new Error(
+      `Daily transaction limit exceeded. Card ending ${lastFourDigits} has spent $${limitCheck.currentTotal.toFixed(2)} of $${limitCheck.limit} daily limit.`
+    );
+  }
+
   const card = cardValidator(number);
   const { card_type: cardType, valid } = card.getCardDetails();
 
@@ -79,7 +95,6 @@ module.exports.charge = async request => {
     span.setAttribute('app.payment.charged', true);
   }
 
-  const { units, nanos, currencyCode } = request.amount;
   logger.info({ transactionId, cardType, lastFourDigits, amount: { units, nanos, currencyCode }, loyalty_level }, 'Transaction complete.');
   transactionsCounter.add(1, { 'app.payment.currency': currencyCode });
   span.end();
