@@ -16,6 +16,9 @@ use quote::create_quote_from_count;
 mod tracking;
 use tracking::create_tracking_id;
 
+pub mod express;
+use express::{calculate_express_cost, parse_tier};
+
 const NANOS_MULTIPLE: i32 = 10000000i32;
 
 const RPC_SYSTEM_GRPC: &'static str = "grpc";
@@ -60,16 +63,16 @@ impl ShippingService for ShippingServer {
         let parent_cx =
             global::get_text_map_propagator(|prop| prop.extract(&MetadataMap(request.metadata())));
 
+        // Check for express shipping tier in metadata
+        let shipping_tier = request
+            .metadata()
+            .get("x-shipping-tier")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("standard");
+        let tier = parse_tier(shipping_tier);
+
         let request_message = request.into_inner();
 
-        let itemct: u32 = request_message
-            .items
-            .into_iter()
-            .fold(0, |accum, cart_item| accum + (cart_item.quantity as u32));
-
-        // We may want to ask another service for product pricing / info
-        // (although now everything is assumed to be the same price)
-        // check out the create_quote_from_count method to see how we use the span created here
         let tracer = global::tracer("shipping");
         let mut span = tracer
             .span_builder("oteldemo.ShippingService/GetQuote")
@@ -78,36 +81,69 @@ impl ShippingService for ShippingServer {
         span.set_attribute(KeyValue::new(semconv::trace::RPC_SYSTEM, RPC_SYSTEM_GRPC));
         span.set_attribute(KeyValue::new(semconv::trace::RPC_SERVICE, RPC_SERVICE_SHIPPING));
         span.set_attribute(KeyValue::new(semconv::trace::RPC_METHOD, "GetQuote"));
+        span.set_attribute(KeyValue::new("app.shipping.tier", tier.name().to_string()));
 
         span.add_event("Processing get quote request".to_string(), vec![]);
         span.set_attribute(KeyValue::new(
             "app.shipping.zip_code",
-            request_message.address.unwrap().zip_code,
+            request_message.address.as_ref().map_or("".to_string(), |a| a.zip_code.clone()),
         ));
 
         let cx = Context::current_with_span(span);
-        let q = match create_quote_from_count(itemct)
-            .with_context(cx.clone())
-            .await
-        {
-            Ok(quote) => quote,
-            Err(status) => {
-                cx.span().set_attribute(KeyValue::new(
-                    semconv::trace::RPC_GRPC_STATUS_CODE,
-                    RPC_GRPC_STATUS_CODE_UNKNOWN,
-                ));
-                return Err(status);
+
+        // Use weight-based express pricing for non-standard tiers
+        let reply = match tier {
+            express::ShippingTier::Standard => {
+                let itemct: u32 = request_message
+                    .items
+                    .into_iter()
+                    .fold(0, |accum, cart_item| accum + (cart_item.quantity as u32));
+
+                let q = match create_quote_from_count(itemct)
+                    .with_context(cx.clone())
+                    .await
+                {
+                    Ok(quote) => quote,
+                    Err(status) => {
+                        cx.span().set_attribute(KeyValue::new(
+                            semconv::trace::RPC_GRPC_STATUS_CODE,
+                            RPC_GRPC_STATUS_CODE_UNKNOWN,
+                        ));
+                        return Err(status);
+                    }
+                };
+                info!("Sending Standard Quote: {}", q);
+                GetQuoteResponse {
+                    cost_usd: Some(Money {
+                        currency_code: "USD".into(),
+                        units: q.dollars,
+                        nanos: q.cents * NANOS_MULTIPLE,
+                    }),
+                }
+            }
+            _ => {
+                // Express/Overnight: weight-based pricing
+                // BUG: Uses quantity as weight_kg (products don't have weight data)
+                let items: Vec<(u32, f64)> = request_message
+                    .items
+                    .iter()
+                    .map(|cart_item| (cart_item.quantity as u32, cart_item.quantity as f64))
+                    .collect();
+
+                let cost = calculate_express_cost(&items, tier);
+                let dollars = cost.floor() as i64;
+                let cents = ((cost * 100.0) as i32) % 100;
+
+                info!("Sending Express Quote: {}.{:02}", dollars, cents);
+                GetQuoteResponse {
+                    cost_usd: Some(Money {
+                        currency_code: "USD".into(),
+                        units: dollars,
+                        nanos: cents * NANOS_MULTIPLE,
+                    }),
+                }
             }
         };
-
-        let reply = GetQuoteResponse {
-            cost_usd: Some(Money {
-                currency_code: "USD".into(),
-                units: q.dollars,
-                nanos: q.cents * NANOS_MULTIPLE,
-            }),
-        };
-        info!("Sending Quote: {}", q);
 
         cx.span().set_attribute(KeyValue::new(
             semconv::trace::RPC_GRPC_STATUS_CODE,
