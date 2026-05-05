@@ -169,6 +169,42 @@ public class ValkeyCartStore : ICartStore
         }
     }
 
+    public async Task RemoveItemAsync(string userId, string productId)
+    {
+        if (_logger.IsEnabled(LogLevel.Information))
+        {
+            _logger.LogInformation("RemoveItemAsync called with userId={userId}, productId={productId}", userId, productId);
+        }
+
+        try
+        {
+            EnsureRedisConnected();
+
+            var db = _redis.GetDatabase();
+
+            var value = await db.HashGetAsync(userId, CartFieldName);
+
+            if (value.IsNull)
+            {
+                return;
+            }
+
+            var cart = Oteldemo.Cart.Parser.ParseFrom(value);
+            var existingItem = cart.Items.SingleOrDefault(i => i.ProductId == productId);
+            if (existingItem != null)
+            {
+                cart.Items.Remove(existingItem);
+            }
+
+            await db.HashSetAsync(userId, new[]{ new HashEntry(CartFieldName, cart.ToByteArray()) });
+            await db.KeyExpireAsync(userId, TimeSpan.FromMinutes(60));
+        }
+        catch (Exception ex)
+        {
+            throw new RpcException(new Status(StatusCode.FailedPrecondition, $"Can't access cart storage. {ex}"));
+        }
+    }
+
     public async Task EmptyCartAsync(string userId)
     {
         _logger.LogInformation("EmptyCartAsync called with userId={userId}", userId);

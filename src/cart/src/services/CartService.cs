@@ -17,12 +17,14 @@ public class CartService : Oteldemo.CartService.CartServiceBase
     private readonly ICartStore _badCartStore;
     private readonly ICartStore _cartStore;
     private readonly IFeatureClient _featureFlagHelper;
+    private readonly CartValidator _cartValidator;
 
-    public CartService(ICartStore cartStore, ICartStore badCartStore, IFeatureClient featureFlagService)
+    public CartService(ICartStore cartStore, ICartStore badCartStore, IFeatureClient featureFlagService, CartValidator cartValidator)
     {
         _badCartStore = badCartStore;
         _cartStore = cartStore;
         _featureFlagHelper = featureFlagService;
+        _cartValidator = cartValidator;
     }
 
     public override async Task<Empty> AddItem(AddItemRequest request, ServerCallContext context)
@@ -34,6 +36,15 @@ public class CartService : Oteldemo.CartService.CartServiceBase
 
         try
         {
+            var currentCart = await _cartStore.GetCartAsync(request.UserId);
+            var validationResult = _cartValidator.ValidateAddItem(currentCart, request.Item.ProductId, request.Item.Quantity);
+
+            if (validationResult != CartValidationResult.Valid)
+            {
+                activity?.SetTag("app.cart.validation.result", validationResult.ToString());
+                throw new RpcException(new Status(StatusCode.InvalidArgument, $"Cart validation failed: {validationResult}"));
+            }
+
             await _cartStore.AddItemAsync(request.UserId, request.Item.ProductId, request.Item.Quantity);
 
             return Empty;

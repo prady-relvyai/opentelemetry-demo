@@ -4,6 +4,7 @@ using System;
 
 using cart.cartstore;
 using cart.services;
+using Microsoft.Extensions.Configuration;
 
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -45,11 +46,17 @@ builder.Services.AddSingleton<IFeatureClient>(x => {
     return client;
 });
 
+var cartValidationConfig = new CartValidationConfig();
+builder.Configuration.GetSection("CartValidation").Bind(cartValidationConfig);
+builder.Services.AddSingleton(cartValidationConfig);
+builder.Services.AddSingleton<CartValidator>();
+
 builder.Services.AddSingleton(x =>
     new CartService(
         x.GetRequiredService<ICartStore>(),
         new ValkeyCartStore(x.GetRequiredService<ILogger<ValkeyCartStore>>(), "badhost:1234"),
-        x.GetRequiredService<IFeatureClient>()
+        x.GetRequiredService<IFeatureClient>(),
+        x.GetRequiredService<CartValidator>()
 ));
 
 
